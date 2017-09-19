@@ -1,4 +1,12 @@
 
+#### The Following function has been taken and modified slightly from https://github.com/omarwagih/rmimp/blob/master/R/pwm-functions.r
+
+require(GenomicRanges)
+require(data.table)
+require(Biostrings)
+require(parallel)
+require(matrixcalc)
+
 # Constants
 AA = c('A', 'R', 'N', 'D', 'C', 'Q', 'E', 'G', 'H', 'I', 'L', 'K', 'M', 'F', 'P', 'S', 'T', 'W', 'Y', 'V')
 AA_PRIORS_HUMAN  =   c(A=0.070, R=0.056, N=0.036, D=0.048,C=0.023,Q=0.047,E=0.071,G=0.066,H=0.026,I=0.044,
@@ -57,182 +65,37 @@ PWM <- function(seqs, pseudocount=0.01, relative.freq=T, is.kinase.pwm=T, priors
     # Do relative frequencies
     if(relative.freq) col = col / sum(col)
     
-    col
+    #take log2 of frequency/background
+    log2(col/bg.prob)
   })
   
   # Information content for MATCH score
-  ic2 = apply(pwm.matrix, 2, function(col) sum(col* log2(col/bg.prob), na.rm=T))
+  #ic2 = apply(pwm.matrix, 2, function(col) sum(col* log2(col/bg.prob), na.rm=T))
   
-  attr(pwm.matrix, 'pseudocount') = pseudocount
-  attr(pwm.matrix, 'match.ic') = ic2
+  #attr(pwm.matrix, 'pseudocount') = pseudocount
+  #attr(pwm.matrix, 'match.ic') = ic2
   
   # Assign AA names to rows/pos col
   rownames(pwm.matrix) = namespace
   colnames(pwm.matrix) = 1:num.pos
-  attr(pwm.matrix, 'is.kinase.pwm') = is.kinase.pwm
+  #attr(pwm.matrix, 'is.kinase.pwm') = is.kinase.pwm
   
-  attr(pwm.matrix, 'nseqs') = length(seqs)
+  #attr(pwm.matrix, 'nseqs') = length(seqs)
   return(pwm.matrix)
 }
 
-
-#' Create a degenerate PWM
-#' i.e. for each aa group, set weight to the best weight of the group at that position
-#' e.g. R-2 has weight 0.7, K-2 has weight 0.1. Set both R-2 and K-2 to 0.7
-#' 
-#' @param pwm position weight matrix
-#' @param dgroups groups of amino acids
-#' 
-#' @keywords internal
-degeneratePWM <- function(pwm, dgroups=c('DE','KR','ILMV','QN','ST')){
-  .pwm = pwm
-  sp = strsplit(dgroups, '')
-  for(dgroup in sp){
-    .pwm[dgroup,] = apply(.pwm[dgroup,], 2, function(z) (z * 0) + max(z))
-  }
-  .pwm
-}
-
-
-#' Get weight/probability for each amino acid in a sequence 
-#' 
-#' Gets weight/probability for the amino acid at each position of the sequence
-#' as an array.
-#'
-#' @param seqs One or more sequences to be processed
-#' @param pwm Position weight matrix
-#' @param do_sum If TRUE sum position-based scores per sequence
-#' @param ignore_cent If TRUE, ignore central residue before returning
-#'  
-#' @keywords internal pwm mss match tfbs
-#' @examples
-#' # No Examples
-scoreArrayFast <- function(seqs, pwm, do_sum = T, ignore_cent=F){
-  
-  # Number of positions
-  npos = ncol(pwm)
-  nseqs = length(seqs)
-  
-  # Central index
-  cent_ind = ceiling(npos/2)
-  
-  cent_inds = seq(cent_ind, by = npos, length.out=nseqs)
-  
-  # Split sequence
-  sp = strsplit(paste0(seqs, collapse=''), '')[[1]]
-  
-  # Ignore central residue 
-  npos_2 = npos
-  if(ignore_cent){
-    sp = sp[-cent_inds]
-    npos_2 = npos - 1
-    pwm = pwm[,-cent_ind]
-  }
-  col_ind = rep(1:npos_2, times=nseqs)
-  id = rep(1:nseqs, each=npos_2)
-  
-  # Extract position-based scores from matrix
-  row_ind = as.numeric( factor(sp, levels = rownames(pwm)) )
-  sc = pwm[ row_ind + (col_ind-1L)*nrow(pwm) ]
-  
-  # Do fast group sum with data tables
-  if(do_sum){
-    dt = data.table(id=id, score=sc)
-    dt = dt[, list(mysum=sum(score, na.rm = T)) ,by='id' ]
-    return( dt[[2]] )
-  }
-  
-  # Not doing sum - return position based scores per sequence
-  by_seq = split(sc, id)
-  names(by_seq) = seqs
-  return(by_seq)
-}
-
-
-#' Compute matrix similarity score as described in MATCH algorithm
-#' 
-#' Computes matrix similarity score of a PWM with a k-mer.
-#' Score ranges from 0-1, as described in [PMID: 12824369]
-#'
-#' @param seqs Sequences to be scored
-#' @param pwm Position weight matrix
-#' @param na_rm Remove NA scores?
-#' @param ignore_cent If TRUE, central residue is ignore from scoring.
-#'  
-#' @keywords pwm mss match tfbs
-#' 
-#' @keywords internal
-#' @examples
-#' # No Examples
-mss <- function(seqs, pwm, na_rm=F, ignore_cent=T){
-  cent_ind = ceiling(ncol(pwm)/2)
-  # Only score sequences which have a central residue S/T or Y depending on the PWM
-  kinase_type = names(which.max(pwm[,cent_ind]))
-  kinase_type = ifelse(grepl('S|T', kinase_type), 'S|T', 'Y')
-  central_res = kinase_type
-  
-  # Central residue index
-  central_ind = NA
-  if(ignore_cent)
-    central_ind = ceiling(ncol(pwm)/2)
-  
-  # Info content
-  ic = attr(pwm, 'match.ic')
-  pwm_match = sweep(pwm, MARGIN=2, ic ,`*`)
-  
-  # Best/worst sequence match
-  best_score = scoreArrayFast(bestSequence(pwm_match), pwm_match, 
-                              ignore_cent = ignore_cent)
-  worst_score = scoreArrayFast(worstSequence(pwm_match), pwm_match, 
-                               ignore_cent = ignore_cent)
-  
-  # Get array of scores
-  keep_scores = grepl(central_res, substr(seqs, central_ind, central_ind))
-  
-  # Score only ones we're keeping
-  scores = rep(NA, length(seqs))
-  if(sum(keep_scores) != 0){
-    scores[keep_scores] = scoreArrayFast(seqs[keep_scores], pwm_match, 
-                                         ignore_cent = ignore_cent)
-  }
-  
-  # Normalize
-  scores = (scores - worst_score) / (best_score - worst_score)
-  
-  # Remove NA if requested
-  if(na_rm) scores = scores[!is.na(scores)]
-  
-  # For thinks on terminals - can end up with negatives
-  scores[scores < 0] = 0
-  return(scores)
-}
-
-
-
-#' Given a position weight matrix, find the best matching sequence
-#' 
-#' Finds the amino acid at each position of the PWM with the highest occurence.
-#' Used in matrix similarity score calculation.  
-#'
-#' @param pwm Position weight matrix
-#' @keywords internal pwm best
-#' @examples
-#' # No Examples
-bestSequence <- function(pwm){
-  b = rownames(pwm)[apply(pwm, 2, which.max)]
-  return(paste(b, collapse=''))
-}
-
-#' Given a position weight matrix, find the worst matching sequence
-#' 
-#' Finds the amino acid at each position of the PWM with the lowest occurence.
-#' Used in matrix similarity score calculation.  
-#'
-#' @param pwm Position weight matrix
-#' @keywords internal pwm worst
-#' @examples
-#' # No Examples
-worstSequence <- function(pwm){
-  w = rownames(pwm)[apply(pwm, 2, which.min)]
-  return(paste(w, collapse=''))
+get_distance<-function(A,B){
+  # if ("X" %in% row.names(A)){
+  #   c<-0
+  #   for (num in A["X",]){
+  #     c<-c+1
+  #     if(num> 0){
+  #       A[,c]<-A[,c]+num/20
+  #     }
+  #   }
+  #   A<-A[!(rownames(A) %in% "X"),]
+  # }
+  subtracted<-A-B
+  frobeniusNormSubtracted<-frobenius.norm(subtracted)
+  pwmDistance<-frobeniusNormSubtracted/(dim(B)[2]+dim(A)[2])
 }
